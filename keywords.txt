@@ -1,0 +1,21 @@
+# Datatypes (KEYWORD1)
+ampx_modbus_tcpip	KEYWORD1
+
+# Methods and Functions (KEYWORD2)
+modbus_init	KEYWORD2
+modbus_test_connection	KEYWORD2
+modbus_read_registers_tcpip	KEYWORD2
+combine_registers_integer	KEYWORD2
+combine_registers_float	KEYWORD2
+printHex	KEYWORD2
+dumpBytes	KEYWORD2
+modbus_send_request	KEYWORD2
+modbus_read_response	KEYWORD2
+
+# Constants (LITERAL1)
+MODBUS_PORT	LITERAL1
+UNIT_ID	LITERAL1
+READ_HOLDING_REGISTERS	LITERAL1
+READ_INPUT_REGISTERS	LITERAL1
+BIG_ENDIAN_FORMAT	LITERAL1
+LITTLE_ENDIAN_FORMAT	LITERAL1 
