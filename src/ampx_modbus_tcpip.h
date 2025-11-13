@@ -35,7 +35,7 @@ void dumpBytes(byte* buffer, int length);
 // Initialize Modbus TCP client with server IP
 void modbus_init(IPAddress serverIP);
 
-// Function to test network connectivity
+// Function to test modbus connectivity, modbusClient.connected()
 bool modbus_test_connection();
 
 // Function to send Modbus TCP request

@@ -74,7 +74,7 @@ void modbus_init(IPAddress serverIP) {
   debugln(modbusServerIP);
 }
 
-// Function to test network connectivity
+// Function to test modbus connectivity, modbusClient.connected()
 bool modbus_test_connection() {
   if (modbusClient.connected()) {
     modbusClient.stop();
