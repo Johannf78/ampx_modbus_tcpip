@@ -35,6 +35,10 @@ void dumpBytes(byte* buffer, int length);
 // Initialize Modbus TCP client with server IP
 void modbus_init(IPAddress serverIP);
 
+// Called once per millisecond while waiting for a meter reply.
+// The sketch uses this to keep HTTP and the WebSocket alive during that wait.
+void modbus_set_idle_callback(void (*callback)());
+
 // Function to test modbus connectivity, modbusClient.connected()
 bool modbus_test_connection();
 

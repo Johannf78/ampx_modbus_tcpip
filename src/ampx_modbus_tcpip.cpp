@@ -31,6 +31,11 @@
 // Global client for Modbus communication
 EthernetClient modbusClient;
 IPAddress modbusServerIP;  // Will be set by init function
+void (*modbusIdleCallback)() = nullptr;
+
+void modbus_set_idle_callback(void (*callback)()) {
+  modbusIdleCallback = callback;
+}
 
 // Function to combine two 16-bit registers into a 32-bit unsigned integer
 // endianFormat: true for big-endian, false for little-endian
@@ -76,14 +81,18 @@ void modbus_init(IPAddress serverIP) {
 
 // Function to test modbus connectivity, modbusClient.connected()
 bool modbus_test_connection() {
+
+
   if (modbusClient.connected()) {
-    modbusClient.stop();
+    debugln("Already connected");
+    return true;
   }
   
   debug("Testing connection to Modbus server... ");
   if (modbusClient.connect(modbusServerIP, MODBUS_PORT)) {
     debugln("Success!");
-    modbusClient.stop();
+    //Don't stop the connection, it will be closed by the caller
+    //modbusClient.stop();
     return true;
   } else {
     debugln("Failed!");
@@ -112,20 +121,21 @@ bool modbus_send_request(uint16_t startReg, uint16_t numRegs, uint8_t functionCo
   
   transactionId++;  // Increment for next request
   
-  // Connect to server
-  debug("Connecting to ");
-  debug(modbusServerIP);
-  debug(":");
-  debugln(MODBUS_PORT);
+  // Reuse the socket opened by modbus_test_connection(). Connect only if it dropped.
+  // If the socket is still connected, don't connect again.
+  if (!modbusClient.connected()) {
   
-  if (modbusClient.connected()) {
-    modbusClient.stop();
+    debug("Connecting to ");
+    debug(modbusServerIP);
+    debug(":");
+    debugln(MODBUS_PORT);
+
+    if (!modbusClient.connect(modbusServerIP, MODBUS_PORT)) {
+      debugln("Connection failed");
+      return false;
+    }
   }
   
-  if (!modbusClient.connect(modbusServerIP, MODBUS_PORT)) {
-    debugln("Connection failed");
-    return false;
-  }
   
   // Send request
   debugln("Sending request:");
@@ -142,26 +152,55 @@ bool modbus_read_response(uint16_t* data, int expectedBytes) {
   byte buffer[256];  // Response buffer
   
   debugln("Waiting for response...");
-  
-  // Wait for response with timeout
+
+  // Keep reading until the MBAP length says the frame is complete.
+  // Breaking on the first bytes (after delay(100) was removed) treated a partial
+  // packet as a failed reply and closed the socket. The browser WebSocket then
+  // missed its handshake and the page stopped on Disconnected.
+  int frameBytes = 0;
   while (millis() < timeout) {
-    if (modbusClient.available()) {
-      while (modbusClient.available() && bytesRead < sizeof(buffer)) {
-        buffer[bytesRead] = modbusClient.read();
-        bytesRead++;
+    while (modbusClient.available() && bytesRead < (int)sizeof(buffer)) {
+      buffer[bytesRead] = modbusClient.read();
+      bytesRead++;
+    }
+
+    if (frameBytes == 0 && bytesRead >= 6) {
+      uint16_t mbapLength = ((uint16_t)buffer[4] << 8) | buffer[5];
+      // Length counts the bytes after the 6-byte MBAP header. A usable reply
+      // is at least unit id + function + one more byte (9 bytes total).
+      if (mbapLength < 3 || mbapLength > 250) {
+        debugln("Error: Bad MBAP length");
+        modbusClient.stop();
+        return false;
       }
+      frameBytes = 6 + mbapLength;
+    }
+
+    if (frameBytes > 0 && bytesRead >= frameBytes) {
       break;
+    }
+
+    if (modbusIdleCallback) {
+      modbusIdleCallback();
     }
     delay(1);
   }
   
-  modbusClient.stop();  // Close connection after reading
+  //modbusClient.stop();  // Close connection after reading
   
-  // Check for timeout
-  if (bytesRead == 0) {
-    debugln("Error: Response timeout");
-    return false;
-  }
+// A normal reply stays on this socket so the next register does not open port 502 again.
+// A timeout or a short frame leaves unread bytes, so close and let the next register reconnect.
+// 9 bytes is the shortest frame this parser can inspect:
+// 7-byte MBAP header (transaction id, protocol id, length, unit id)
+// plus function code and byte count (or exception code) at buffer[6..8].
+// A real register value is longer (9 + 2 bytes per register); that is checked later.
+// Fewer than 9 bytes is a timeout or a fragment. Close so those bytes cannot
+// sit on the socket and corrupt the next register. A full reply stays open.
+if (bytesRead < 9) {
+  debugln("Error: Response timeout or short frame");
+  modbusClient.stop();
+  return false;
+}
   
   debug("Received ");
   debug(bytesRead);
@@ -169,10 +208,12 @@ bool modbus_read_response(uint16_t* data, int expectedBytes) {
   dumpBytes(buffer, bytesRead);
   
   // Check minimum length
+  /*
   if (bytesRead < 9) {
     debugln("Error: Response too short");
     return false;
   }
+  */
   
   // Parse response
   uint16_t transId = (buffer[0] << 8) | buffer[1];
@@ -212,21 +253,27 @@ bool modbus_read_response(uint16_t* data, int expectedBytes) {
     return true;
   } else {
     debugln("Error: Not enough data in response");
+    // Header arrived without the register bytes. Close so the remainder
+    // cannot be read as the next register's reply. If the socket is not connected, don't close it.
+    modbusClient.stop();
     return false;
   }
 }
 
-// Function to read a register and return the value
+// Function to read a register and return the value.
+// Does not call modbus_test_connection(): that is connect+stop.
+// Callers that want a health check call it themselves (e.g. serviceMeters).
+// Connect failure is handled in modbus_send_request().
 bool modbus_read_registers_tcpip(uint16_t startReg, uint16_t numRegs, uint16_t* data, uint8_t functionCode) {
-  if (!modbus_test_connection()) {
-    debugln("Error: Cannot connect to Modbus server!");
-    return false;
-  }
-  
   if (modbus_send_request(startReg, numRegs, functionCode)) {
-    delay(100);  // Wait for response
+    
+    // No fixed pause here. delay(100) ran before every register (~20 × 100 ms, about 2 s)
+    // even when the meter had already answered. modbus_read_response() waits up to 2 seconds
+    // and returns as soon as the frame arrives, so the pause was not needed to catch the reply.
+    //delay(100);  // Wait for response
+
     return modbus_read_response(data, numRegs * 2);
   }
-  
+
   return false;
-} 
+}
