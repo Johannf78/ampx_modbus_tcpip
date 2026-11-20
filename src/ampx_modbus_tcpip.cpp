@@ -87,12 +87,18 @@ bool modbus_test_connection() {
     debugln("Already connected");
     return true;
   }
-  
+
+  // connected() is already false here, but the W5500 socket can still be in
+  // FIN_WAIT. EthernetClient::connect() then drops that socket index without
+  // socketClose(). Eight abandoned sockets and the chip cannot open port 502,
+  // so the web page stays on Connected with no readings. stop() frees it.
+  modbusClient.stop();
+
   debug("Testing connection to Modbus server... ");
   if (modbusClient.connect(modbusServerIP, MODBUS_PORT)) {
     debugln("Success!");
-    //Don't stop the connection, it will be closed by the caller
-    //modbusClient.stop();
+    // Leave the socket open. The sweep reuses it. The caller does not stop()
+    // after a good sweep; the next pass hits the "Already connected" path.
     return true;
   } else {
     debugln("Failed!");
@@ -122,9 +128,11 @@ bool modbus_send_request(uint16_t startReg, uint16_t numRegs, uint8_t functionCo
   transactionId++;  // Increment for next request
   
   // Reuse the socket opened by modbus_test_connection(). Connect only if it dropped.
-  // If the socket is still connected, don't connect again.
   if (!modbusClient.connected()) {
-  
+    // Same leak as modbus_test_connection(): close the old W5500 socket before
+    // connect() forgets its index.
+    modbusClient.stop();
+
     debug("Connecting to ");
     debug(modbusServerIP);
     debug(":");
@@ -135,13 +143,16 @@ bool modbus_send_request(uint16_t startReg, uint16_t numRegs, uint8_t functionCo
       return false;
     }
   }
-  
-  
-  // Send request
+
+  // Send request. A short write means the meter already dropped the session.
   debugln("Sending request:");
   dumpBytes(requestBuffer, 12);
-  modbusClient.write(requestBuffer, 12);
-  
+  if (modbusClient.write(requestBuffer, 12) != 12) {
+    debugln("Write failed");
+    modbusClient.stop();
+    return false;
+  }
+
   return true;
 }
 
@@ -261,8 +272,9 @@ if (bytesRead < 9) {
 }
 
 // Function to read a register and return the value.
-// Does not call modbus_test_connection(): that is connect+stop.
-// Callers that want a health check call it themselves (e.g. serviceMeters).
+// Does not call modbus_test_connection() — that is the caller's health check
+// (serviceMeters). From 1.2.3 the test leaves the socket open for this sweep.
+// A second test here would connect+stop and force another connect per register.
 // Connect failure is handled in modbus_send_request().
 bool modbus_read_registers_tcpip(uint16_t startReg, uint16_t numRegs, uint16_t* data, uint8_t functionCode) {
   if (modbus_send_request(startReg, numRegs, functionCode)) {
